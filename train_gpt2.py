@@ -3,18 +3,19 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import math
+import tiktoken
 
 from torch.nn import functional as F
 
 def get_device():
     if torch.cuda.is_available():
-        return 'cuda'
+        device = 'cuda'
     elif hasattr(torch, 'mps') and torch.mps.is_available():
-        return 'mps'
+        device = 'mps'
     else:
-        return 'cpu'
-
-device = get_device()
+        device = 'cpu'
+    print(f"using device: {device}")
+    return device
 
 @dataclass
 class GPTConfig:
@@ -98,7 +99,6 @@ class GPT(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
-        
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
@@ -107,7 +107,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         
-    def forward(self, idx):
+    def forward(self, idx, targets = None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -121,7 +121,10 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
 
-        return logits
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
         
     @classmethod
     def from_pretrained(clas, model_type):
@@ -172,34 +175,99 @@ class GPT(nn.Module):
 
         return model
     
-num_sequences = 5
-max_length = 30
-
-model = GPT.from_pretrained('gpt2')
-model.eval()
-model.to(device)
-
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello, I'm language model,")
-tokens = torch.tensor(tokens, dtype=torch.long)
-tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
-x = tokens.to(device)
-
-torch.manual_seed(10)
-torch.mps.manual_seed(10)
-
-while x.size(1) < max_length:
-    with torch.no_grad():
-        logits = model(x)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits, dim=1)
-        topk_probs, topk_indicies = torch.topk(probs, 50, dim=-1)
-        ix = torch.multinomial(topk_probs, 1)
-        xcol = torch.gather(topk_indicies, -1, ix)
-        x = torch.cat((x, xcol), dim=1)
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
         
-for i in range(num_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens=tokens)
-    print(f"> {decoded}")
+        with open('input.txt') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        
+        print(f"total tokens: {len(self.tokens)}")
+        print(f"total batches: {len(self.tokens) // (B*T)}")
+        
+        self.current_pos = 0
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        B, T = self.B, self.T
+        if self.current_pos + B*T + 1 > len(self.tokens):
+            self.current_pos = 0
+            raise StopIteration
+        
+        buf = self.tokens[self.current_pos:self.current_pos + B*T + 1]
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+        self.current_pos += B*T
+        return x, y
+
+train_loader = DataLoaderLite(B=4, T=32)
+device = get_device()
+model = GPT(GPTConfig()).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+
+#optimzier
+for i, data in enumerate(train_loader):
+    batch, target = data
+    batch, target = batch.to(device), target.to(device)
+    optimizer.zero_grad()
+    logits, loss = model(batch, target)
+    
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss: {loss.item()}")
+    
+
+# import tiktoken
+# enc = tiktoken.get_encoding('gpt2')
+
+# with open('input.txt') as f:
+#     text = f.read()
+# text = text[:1000]
+# tokens = enc.encode(text)
+
+# B, T = 4, 32
+# buf = torch.tensor(tokens[:B*T + 1])
+# buf = buf.to(device)
+# x = buf[:-1].view(B, T)
+# y = buf[1:].view(B, T)
+# 
+# from time import time
+# start = time()
+# for i in range(50):
+#     
+#     
+#     loss.backward()
+#     optimizer.step()
+    
+#     print(f"step {i}, loss: {loss.item()}")
+# print(f"training took {time() - start} seconds")
+
+# tokens = enc.encode("Hello, I'm language model,")
+# tokens = torch.tensor(tokens, dtype=torch.long)
+# tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
+# x = tokens.to(device)
+
+# torch.manual_seed(10)
+# torch.mps.manual_seed(10)
+
+# while x.size(1) < max_length:
+#     with torch.no_grad():
+#         logits = model(x)
+#         logits = logits[:, -1, :]
+#         probs = F.softmax(logits, dim=1)
+#         topk_probs, topk_indicies = torch.topk(probs, 50, dim=-1)
+#         ix = torch.multinomial(topk_probs, 1)
+#         xcol = torch.gather(topk_indicies, -1, ix)
+#         x = torch.cat((x, xcol), dim=1)
+        
+# for i in range(num_sequences):
+#     tokens = x[i, :max_length].tolist()
+#     decoded = enc.decode(tokens=tokens)
+#     print(f"> {decoded}")
