@@ -242,9 +242,10 @@ if hasattr(torch, 'mps'):
 train_loader = DataLoaderLite(B=16, T=1024)
 device = get_device()
 model = GPT(GPTConfig()).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+model = torch.compile(model)
 
 #optimzier
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i, data in enumerate(train_loader):
     start_time = time.time()
     batch, target = data
