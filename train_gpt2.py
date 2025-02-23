@@ -8,6 +8,8 @@ import time
 
 from torch.nn import functional as F
 
+torch.set_float32_matmul_precision('high')
+
 def get_device():
     if torch.cuda.is_available():
         device = 'cuda'
