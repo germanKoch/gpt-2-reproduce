@@ -246,7 +246,8 @@ if hasattr(torch, 'mps'):
 
 train_loader = DataLoaderLite(B=16, T=1024)
 device = get_device()
-model = GPT(GPTConfig()).to(device)
+# vocab size ovverriden to optimize computations
+model = GPT(GPTConfig(vocab_size=50304)).to(device)
 model = torch.compile(model)
 
 #optimzier
