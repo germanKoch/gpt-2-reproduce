@@ -8,8 +8,6 @@ import time
 
 from torch.nn import functional as F
 
-torch.set_float32_matmul_precision('high')
-
 def get_device():
     if torch.cuda.is_available():
         device = 'cuda'
@@ -233,6 +231,8 @@ class DataLoaderLite:
 
 #-------------Training loop----------------
 torch.manual_seed(1337)
+torch.set_float32_matmul_precision('high')
+
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
