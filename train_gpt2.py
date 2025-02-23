@@ -254,7 +254,7 @@ for i, data in enumerate(train_loader):
     loss.backward()
     optimizer.step()
     
-    torch.mps.synchronize()
+    torch.cuda.synchronize()
     dt = (time.time() - start_time) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (dt/1000)
     
