@@ -264,7 +264,7 @@ def get_lr(it):
         return min_lr
     
     decay_ratio = (it-warmup_steps) / (max_steps - warmup_steps)
-    coeff = 0.5 * (1.0 + torch.cos(decay_ratio * math.pi))
+    coeff = 0.5 * (1.0 + math.cos(decay_ratio * math.pi))
     return min_lr + coeff * (max_lr - min_lr)
     
 
@@ -298,7 +298,7 @@ for step in range(max_steps):
     dt = (time.time() - start_time) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (dt/1000)
     
-    print(f"step {step} | loss: {loss.item()} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm} | lr: {lr}")
+    print(f"step {step} | loss: {loss.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
     
 
 # import tiktoken
