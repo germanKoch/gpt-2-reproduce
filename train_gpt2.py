@@ -5,6 +5,7 @@ import torch.nn as nn
 import tiktoken
 import time
 import math 
+import inspect
 
 from torch.nn import functional as F
 
@@ -203,6 +204,30 @@ class GPT(nn.Module):
 
         return model
     
+    def configure_optimizers(self, weight_decay=0.01, lr=6e-4, device='cpu'):
+        params_dict = {pn: p for pn, p in self.named_parameters()}
+        params_dict = {pn: p for pn, p in params_dict.items() if p.requires_grad}
+        
+        decay_params = [p for n, p in params_dict.items() if p.dim() >= 2]
+        no_decay_params = [p for n, p in params_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+        
+        print('weight decay params: ', num_decay_params)
+        print('weight no-decay params: ', num_no_decay_params)
+        
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+        
+        
+        
+    
 class DataLoaderLite:
     def __init__(self, B, T):
         self.B = B
@@ -256,6 +281,7 @@ max_lr = 6e-4
 min_lr = 0.1 * max_lr
 warmup_steps = 10
 max_steps = 50
+weight_decay = 0.1
 
 def get_lr(it):
     if it < warmup_steps:
@@ -270,7 +296,8 @@ def get_lr(it):
 
 
 #optimzier
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+#optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
+optimizer = model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 for step in range(max_steps):
     start_time = time.time()
