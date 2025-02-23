@@ -2,9 +2,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import math
 import tiktoken
 import time
+import math 
 
 from torch.nn import functional as F
 
@@ -226,7 +226,6 @@ class DataLoaderLite:
         B, T = self.B, self.T
         if self.current_pos + B*T + 1 > len(self.tokens):
             self.current_pos = 0
-            raise StopIteration
         
         buf = self.tokens[self.current_pos:self.current_pos + B*T + 1]
         x = buf[:-1].view(B, T)
@@ -252,12 +251,31 @@ if device=='mps':
     model = torch.compile(model, backend="aot_eager")
 else:
     model = torch.compile(model)
+    
+max_lr = 6e-4
+min_lr = 0.1 * max_lr
+warmup_steps = 10
+max_steps = 50
+
+def get_lr(it):
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
+    if it > max_steps:
+        return min_lr
+    
+    decay_ratio = (it-warmup_steps) / (max_steps - warmup_steps)
+    coeff = 0.5 * (1.0 + torch.cos(decay_ratio * math.pi))
+    return min_lr + coeff * (max_lr - min_lr)
+    
+
 
 #optimzier
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-for i, data in enumerate(train_loader):
+
+for step in range(max_steps):
     start_time = time.time()
-    batch, target = data
+    
+    batch, target = next(train_loader)
     batch, target = batch.to(device), target.to(device)
     optimizer.zero_grad()
     
@@ -266,8 +284,12 @@ for i, data in enumerate(train_loader):
     
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(step)
     
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
+    
     if device == 'cuda':
         torch.cuda.synchronize()
     elif device == 'mps':
@@ -276,7 +298,7 @@ for i, data in enumerate(train_loader):
     dt = (time.time() - start_time) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (dt/1000)
     
-    print(f"step {i} | loss: {loss.item()} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm}")
+    print(f"step {step} | loss: {loss.item()} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm} | lr: {lr}")
     
 
 # import tiktoken
