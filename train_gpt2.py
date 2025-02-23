@@ -247,16 +247,20 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 #optimzier
 for i, data in enumerate(train_loader):
     start_time = time.time()
-    
     batch, target = data
     batch, target = batch.to(device), target.to(device)
     optimizer.zero_grad()
-    logits, loss = model(batch, target)
+    
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(batch, target)
     
     loss.backward()
     optimizer.step()
-    
-    torch.cuda.synchronize()
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    elif device == 'mps':
+        torch.mps.synchronize()
+        
     dt = (time.time() - start_time) * 1000
     tokens_per_sec = (train_loader.B * train_loader.T) / (dt/1000)
     
