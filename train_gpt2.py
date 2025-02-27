@@ -6,8 +6,12 @@ import tiktoken
 import time
 import math 
 import inspect
+import torch.distributed as dist
+import os
 
 from torch.nn import functional as F
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 def get_device():
     if torch.cuda.is_available():
@@ -229,9 +233,11 @@ class GPT(nn.Module):
         
     
 class DataLoaderLite:
-    def __init__(self, B, T):
+    def __init__(self, B, T, local_rank=0, world_size=1):
         self.B = B
         self.T = T
+        self.local_rank = local_rank
+        self.world_size = world_size
         
         with open('input.txt') as f:
             text = f.read()
@@ -242,20 +248,20 @@ class DataLoaderLite:
         print(f"total tokens: {len(self.tokens)}")
         print(f"total batches: {len(self.tokens) // (B*T)}")
         
-        self.current_pos = 0
+        self.current_pos = local_rank * B * T
     
     def __iter__(self):
         return self
     
     def __next__(self):
-        B, T = self.B, self.T
-        if self.current_pos + B*T + 1 > len(self.tokens):
-            self.current_pos = 0
+        B, T, local_rank, world_size = self.B, self.T, self.local_rank, self.world_size
+        if self.current_pos + B * T + 1 > len(self.tokens):
+            self.current_pos = local_rank * B * T
         
         buf = self.tokens[self.current_pos:self.current_pos + B*T + 1]
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
-        self.current_pos += B*T
+        self.current_pos += B * T * world_size
         return x, y
 
 #-------------Training loop----------------
@@ -267,23 +273,50 @@ if torch.cuda.is_available():
 
 if hasattr(torch, 'mps'):
     torch.mps.manual_seed(1337)
+    
+ddp = int(os.environ.get('RANK', -1)) != -1
+if ddp:
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    
+    ddp_rank = int(os.environ.get('RANK'))
+    ddp_local_rank = int(os.environ.get('LOCAL_RANK'))
+    ddp_world_size = int(os.environ.get('WORLD_SIZE'))
+    device = f"cuda:{ddp_local_rank}"
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
+else:
+    device = get_device()
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    torch.cuda.set_device(device)
+    master_process = True
+    
+print(f"STARTING | ddp_rank: {ddp_rank} | ddp_local_rank: {ddp_local_rank} | ddp_world_size: {ddp_world_size} | device: {device}")
 
 total_batch_size = 524288 #batch size
 B = 16 #micro batch size
 T = 1024 #seq len
-assert total_batch_size % (B*T) == 0 , "total batch size should be multiple of microbatch size"
-grad_accum_steps = total_batch_size // (B*T)
 
-print(f"grad accumulate steps: {grad_accum_steps}")
+assert total_batch_size % (B * T * ddp_world_size) == 0 , "total batch size should be multiple of microbatch size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 
-train_loader = DataLoaderLite(B=16, T=1024)
-device = get_device()
-# vocab size ovverriden to optimize computations
+if master_process:
+    print(f"Batch size: {total_batch_size} | micro batch size: {B} | seq len: {T} | Grad accumulate steps: {grad_accum_steps}")
+
+# data loader
+train_loader = DataLoaderLite(B=16, T=1024, local_rank=ddp_local_rank, world_size=ddp_world_size)
+
+# train the model
 model = GPT(GPTConfig(vocab_size=50304)).to(device)
 if device=='mps':
     model = torch.compile(model, backend="aot_eager")
 else:
     model = torch.compile(model)
+    
+if ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
     
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
@@ -321,10 +354,15 @@ for step in range(max_steps):
         
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         loss.backward()
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    lr = get_lr(step)
     
+    if ddp:
+        dist.all_reduce(loss_accum, po=dist.ReduceOp.AVG)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    
+    lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
@@ -335,10 +373,12 @@ for step in range(max_steps):
         torch.mps.synchronize()
         
     dt = (time.time() - start_time) * 1000
-    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt/1000)
-    
-    print(f"step {step} | loss: {loss_accum.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
-    
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (dt/1000)
+    if master_process:
+        print(f"step {step} | loss: {loss_accum.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
+
+if ddp:
+    destroy_process_group()
 
 # import tiktoken
 # enc = tiktoken.get_encoding('gpt2')
