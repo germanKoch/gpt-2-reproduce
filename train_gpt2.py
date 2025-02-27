@@ -268,6 +268,14 @@ if torch.cuda.is_available():
 if hasattr(torch, 'mps'):
     torch.mps.manual_seed(1337)
 
+total_batch_size = 524288 #batch size
+B = 16 #micro batch size
+T = 1024 #seq len
+assert total_batch_size % (B*T) == 0 , "total batch size should be multiple of microbatch size"
+grad_accum_steps = total_batch_size // (B*T)
+
+print(f"grad accumulate steps: {grad_accum_steps}")
+
 train_loader = DataLoaderLite(B=16, T=1024)
 device = get_device()
 # vocab size ovverriden to optimize computations
@@ -300,16 +308,20 @@ def get_lr(it):
 optimizer = model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 for step in range(max_steps):
+    loss_accum = 0 
     start_time = time.time()
-    
-    batch, target = next(train_loader)
-    batch, target = batch.to(device), target.to(device)
-    optimizer.zero_grad()
-    
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(batch, target)
-    
-    loss.backward()
+
+    for micro_step in range(grad_accum_steps):
+        batch, target = next(train_loader)
+        batch, target = batch.to(device), target.to(device)
+        optimizer.zero_grad()
+        
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(batch, target)
+        
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     
@@ -323,9 +335,9 @@ for step in range(max_steps):
         torch.mps.synchronize()
         
     dt = (time.time() - start_time) * 1000
-    tokens_per_sec = (train_loader.B * train_loader.T) / (dt/1000)
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (dt/1000)
     
-    print(f"step {step} | loss: {loss.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
+    print(f"step {step} | loss: {loss_accum.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
     
 
 # import tiktoken
