@@ -309,14 +309,14 @@ if master_process:
 train_loader = DataLoaderLite(B=16, T=1024, local_rank=ddp_local_rank, world_size=ddp_world_size)
 
 # train the model
-model = GPT(GPTConfig(vocab_size=50304)).to(device)
+raw_model = GPT(GPTConfig(vocab_size=50304)).to(device)
 if device=='mps':
-    model = torch.compile(model, backend="aot_eager")
+    raw_model = torch.compile(raw_model, backend="aot_eager")
 else:
-    model = torch.compile(model)
+    raw_model = torch.compile(raw_model)
     
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+    model = DDP(raw_model, device_ids=[ddp_local_rank])
     
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
@@ -338,7 +338,7 @@ def get_lr(it):
 
 #optimzier
 #optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-optimizer = model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
+optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 for step in range(max_steps):
     loss_accum = 0 
@@ -359,7 +359,7 @@ for step in range(max_steps):
         loss.backward()
     
     if ddp:
-        dist.all_reduce(loss_accum, po=dist.ReduceOp.AVG)
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
     lr = get_lr(step)
