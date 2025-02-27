@@ -317,7 +317,9 @@ else:
     
 if ddp:
     model = DDP(raw_model, device_ids=[ddp_local_rank])
-    
+else:
+    model = raw_model
+
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
 warmup_steps = 10
