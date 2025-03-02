@@ -2,12 +2,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import tiktoken
 import time
 import math 
 import inspect
 import torch.distributed as dist
 import os
+import numpy as np
 
 from torch.nn import functional as F
 from torch.distributed import init_process_group, destroy_process_group
@@ -228,43 +228,100 @@ class GPT(nn.Module):
         use_fused = fused_available and 'cuda' in device
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
-        
-        
+
+#-------------Data loader----------------
+def load_tokens(filename):
+    npt = np.load(filename)
+    npt = npt.astype(np.int32) # added after video
+    ptt = torch.tensor(npt, dtype=torch.long)
+    return ptt
+
+class DataLoaderLite:
+    def __init__(self, B, T, process_rank, num_processes, split):
+        self.B = B
+        self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        assert split in {'train', 'val'}
+
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        self.reset()
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
+        return x, y
         
     
 class DataLoaderLite:
-    def __init__(self, B, T, local_rank=0, world_size=1):
+    def __init__(self, B, T, process_rank, num_processes, split):
         self.B = B
         self.T = T
-        self.local_rank = local_rank
-        self.world_size = world_size
-        
-        with open('input.txt') as f:
-            text = f.read()
-        enc = tiktoken.get_encoding('gpt2')
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-        
-        print(f"total tokens: {len(self.tokens)}")
-        print(f"total batches: {len(self.tokens) // (B*T)}")
-        
-        self.current_pos = local_rank * B * T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        assert split in {'train', 'val'}
+
+        # get the shard filenames
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+        self.reset()
+
+    def reset(self):
+        # state, init at shard zero
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        self.current_position = self.B * self.T * self.process_rank
     
     def __iter__(self):
         return self
     
     def __next__(self):
-        B, T, local_rank, world_size = self.B, self.T, self.local_rank, self.world_size
-        if self.current_pos + B * T + 1 > len(self.tokens):
-            self.current_pos = local_rank * B * T
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T)
+        y = (buf[1:]).view(B, T)
         
-        buf = self.tokens[self.current_pos:self.current_pos + B*T + 1]
-        x = buf[:-1].view(B, T)
-        y = buf[1:].view(B, T)
-        self.current_pos += B * T * world_size
+        self.current_position += B * T * self.num_processes
+        
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
         return x, y
 
 #-------------Training loop----------------
+# To start training loop, run: torchrun --standalone --nproc_per_node=8 train_gpt2.py
 torch.manual_seed(1337)
 torch.set_float32_matmul_precision('high')
 
@@ -290,7 +347,6 @@ else:
     ddp_rank = 0
     ddp_local_rank = 0
     ddp_world_size = 1
-    torch.cuda.set_device(device)
     master_process = True
     
 print(f"STARTING | ddp_rank: {ddp_rank} | ddp_local_rank: {ddp_local_rank} | ddp_world_size: {ddp_world_size} | device: {device}")
@@ -306,7 +362,13 @@ if master_process:
     print(f"Batch size: {total_batch_size} | micro batch size: {B} | seq len: {T} | Grad accumulate steps: {grad_accum_steps}")
 
 # data loader
-train_loader = DataLoaderLite(B=16, T=1024, local_rank=ddp_local_rank, world_size=ddp_world_size)
+train_loader = DataLoaderLite(
+    B=16,
+    T=1024, 
+    process_rank=ddp_local_rank, 
+    num_processes=ddp_world_size,
+    split='train'
+)
 
 # train the model
 raw_model = GPT(GPTConfig(vocab_size=50304)).to(device)
@@ -322,8 +384,8 @@ else:
 
 max_lr = 6e-4
 min_lr = 0.1 * max_lr
-warmup_steps = 10
-max_steps = 50
+warmup_steps = 715
+max_steps = 19073
 weight_decay = 0.1
 
 def get_lr(it):
@@ -338,8 +400,6 @@ def get_lr(it):
     
 
 
-#optimzier
-#optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 for step in range(max_steps):
