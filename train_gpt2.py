@@ -408,9 +408,13 @@ def get_lr(it):
 
 
 optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
 
 for step in range(max_steps):
     start_time = time.time()
+    last_step = (step == max_steps - 1)
     
     if step % 100 == 0:
         model.eval()
@@ -432,6 +436,18 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validaiton loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step % 5000 == 0:
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'config': raw_model.config,
+                    'step': step,
+                    'val_loss': val_loss_accum.item()
+                }
+                torch.save(checkpoint, checkpoint_path)
     
     loss_accum = 0.0
     model.train()
@@ -471,51 +487,3 @@ for step in range(max_steps):
 
 if ddp:
     destroy_process_group()
-
-# import tiktoken
-# enc = tiktoken.get_encoding('gpt2')
-
-# with open('input.txt') as f:
-#     text = f.read()
-# text = text[:1000]
-# tokens = enc.encode(text)
-
-# B, T = 4, 32
-# buf = torch.tensor(tokens[:B*T + 1])
-# buf = buf.to(device)
-# x = buf[:-1].view(B, T)
-# y = buf[1:].view(B, T)
-# 
-# from time import time
-# start = time()
-# for i in range(50):
-#     
-#     
-#     loss.backward()
-#     optimizer.step()
-    
-#     print(f"step {i}, loss: {loss.item()}")
-# print(f"training took {time() - start} seconds")
-
-# tokens = enc.encode("Hello, I'm language model,")
-# tokens = torch.tensor(tokens, dtype=torch.long)
-# tokens = tokens.unsqueeze(0).repeat(num_sequences, 1)
-# x = tokens.to(device)
-
-# torch.manual_seed(10)
-# torch.mps.manual_seed(10)
-
-# while x.size(1) < max_length:
-#     with torch.no_grad():
-#         logits = model(x)
-#         logits = logits[:, -1, :]
-#         probs = F.softmax(logits, dim=1)
-#         topk_probs, topk_indicies = torch.topk(probs, 50, dim=-1)
-#         ix = torch.multinomial(topk_probs, 1)
-#         xcol = torch.gather(topk_indicies, -1, ix)
-#         x = torch.cat((x, xcol), dim=1)
-        
-# for i in range(num_sequences):
-#     tokens = x[i, :max_length].tolist()
-#     decoded = enc.decode(tokens=tokens)
-#     print(f"> {decoded}")
