@@ -363,11 +363,18 @@ if master_process:
 
 # data loader
 train_loader = DataLoaderLite(
-    B=16,
-    T=1024, 
+    B=B,
+    T=T, 
     process_rank=ddp_local_rank, 
     num_processes=ddp_world_size,
     split='train'
+)
+val_loader = DataLoaderLite(
+    B=B,
+    T=T, 
+    process_rank=ddp_local_rank, 
+    num_processes=ddp_world_size,
+    split='val'
 )
 
 # train the model
@@ -403,13 +410,36 @@ def get_lr(it):
 optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 for step in range(max_steps):
-    loss_accum = 0 
     start_time = time.time()
+    
+    if step % 100 == 0:
+        model.eval()
+        val_loader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            
+            for _ in range(val_loss_steps):
+                batch, target = next(val_loader)
+                batch, target = batch.to(device), target.to(device)
+                with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                    logits, loss = model(batch, target)
+                
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        
+        if ddp:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if master_process:
+            print(f"validaiton loss: {val_loss_accum.item():.4f}")
+    
+    loss_accum = 0.0
+    model.train()
+    optimizer.zero_grad()
 
     for micro_step in range(grad_accum_steps):
         batch, target = next(train_loader)
         batch, target = batch.to(device), target.to(device)
-        optimizer.zero_grad()
         
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(batch, target)
