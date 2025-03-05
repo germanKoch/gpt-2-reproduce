@@ -406,7 +406,7 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
     
 
-### 
+#-----------------Optimizer----------------
 optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
 
 
@@ -461,13 +461,16 @@ for step in range(max_steps):
         batch, target = next(train_loader)
         batch, target = batch.to(device), target.to(device)
         
+        # ddp requires setting require_backward_grad_sync
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(batch, target)
         
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        
         loss.backward()
     
     if ddp:
@@ -488,6 +491,8 @@ for step in range(max_steps):
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (dt/1000)
     if master_process:
         print(f"step {step} | loss: {loss_accum.item():.4f} | time: {dt:.2f} | tokens/sec: {tokens_per_sec:.2f} | norm: {norm:.4f} | lr: {lr}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 
 if ddp:
     destroy_process_group()
