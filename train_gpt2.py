@@ -406,17 +406,21 @@ def get_lr(it):
     return min_lr + coeff * (max_lr - min_lr)
     
 
-
+### 
 optimizer = raw_model.configure_optimizers(lr=max_lr, weight_decay=weight_decay, device=device)
+
+
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
 
 for step in range(max_steps):
     start_time = time.time()
     last_step = (step == max_steps - 1)
     
-    if step % 100 == 0:
+    if step % 250 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -438,7 +442,7 @@ for step in range(max_steps):
             print(f"validaiton loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step % 5000 == 0:
+            if step % 5000 == 0 or last_step:
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
