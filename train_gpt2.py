@@ -352,7 +352,7 @@ else:
 print(f"STARTING | ddp_rank: {ddp_rank} | ddp_local_rank: {ddp_local_rank} | ddp_world_size: {ddp_world_size} | device: {device}")
 
 total_batch_size = 524288 #batch size
-B = 16 #micro batch size
+B = 32 #micro batch size
 T = 1024 #seq len
 
 assert total_batch_size % (B * T * ddp_world_size) == 0 , "total batch size should be multiple of microbatch size"
