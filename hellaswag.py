@@ -121,7 +121,7 @@ def iterate_examples(split):
 def evaluate(model_type, device):
 
     torch.set_float32_matmul_precision('high') # use tf32
-    model = GPT2LMHeadModel.from_pretrained(model_type)
+    model = GPT2LMHeadModel.from_pretrained(model_type, cache_dir='./cache')
     model.to(device)
     # model = torch.compile(model) # optionally torch compile the model
 
@@ -135,6 +135,56 @@ def evaluate(model_type, device):
 
         # get the logits
         logits = model(tokens).logits
+        # evaluate the autoregressive loss at all positions
+        shift_logits = (logits[..., :-1, :]).contiguous()
+        shift_tokens = (tokens[..., 1:]).contiguous()
+        flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_shift_tokens = shift_tokens.view(-1)
+        shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
+        shift_losses = shift_losses.view(tokens.size(0), -1)
+        # now get the average loss just for the completion region (where mask == 1), in each row
+        shift_mask = (mask[..., 1:]).contiguous() # we must shift mask, so we start at the last prompt token
+        masked_shift_losses = shift_losses * shift_mask
+        # sum and divide by the number of 1s in the mask
+        sum_loss = masked_shift_losses.sum(dim=1)
+        avg_loss = sum_loss / shift_mask.sum(dim=1)
+        # now we have a loss for each of the 4 completions
+        # the one with the lowest loss should be the most likely
+        pred = sum_loss.argmin().item()
+        pred_norm = avg_loss.argmin().item()
+
+        # accumulate stats
+        num_total += 1
+        num_correct += int(pred == label)
+        num_correct_norm += int(pred_norm == label)
+        print(f"{num_total} acc_norm: {num_correct_norm}/{num_total}={num_correct_norm/num_total:.4f}")
+
+        # debug: pretty print a few examples, and the losses in each case
+        if num_total < 10:
+            print("---")
+            print(f"Context:\n {example['ctx']}")
+            print(f"Endings:")
+            for i, end in enumerate(example["endings"]):
+                print(f"{i} (loss: {avg_loss[i].item():.4f}) {end}")
+            print(f"predicted: {pred_norm}, actual: {label}")
+            
+@torch.no_grad()
+def evaluate_my_model(model, device):
+
+    torch.set_float32_matmul_precision('high') # use tf32
+    model.to(device)
+    # model = torch.compile(model) # optionally torch compile the model
+
+    num_correct_norm = 0
+    num_correct = 0
+    num_total = 0
+    for example in iterate_examples("val"):
+        data, tokens, mask, label = render_example(example)
+        tokens = tokens.to(device)
+        mask = mask.to(device)
+
+        # get the logits
+        logits = model(tokens)[0]
         # evaluate the autoregressive loss at all positions
         shift_logits = (logits[..., :-1, :]).contiguous()
         shift_tokens = (tokens[..., 1:]).contiguous()
