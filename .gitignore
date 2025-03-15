@@ -4,3 +4,5 @@ data_cache/
 edu_fineweb10B/
 log/
 lg/
+__pycache__/
+hellaswag/
